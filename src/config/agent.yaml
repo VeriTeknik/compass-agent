@@ -17,7 +17,7 @@ metadata:
     - research
     - multi-model
   icon: "compass"
-  icon_url: "https://raw.githubusercontent.com/veriteknik/compass-agent/main/icon.png"
+  icon_url: "https://raw.githubusercontent.com/VeriTeknik/compass-agent/main/icon.png"
   author: "pluggedin"
   license: "MIT"
   homepage: "https://compass.plugged.in"
