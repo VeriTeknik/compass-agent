@@ -330,6 +330,9 @@ compass_consensus_no_consensus_total ${data.consensusResults.no_consensus}
           agreementScore: report.agreementScore,
         },
         models_used: report.successfulModels || [],
+        // Include individual model responses for UI to display
+        model_responses: report.responses || [],
+        failed_models: report.failedModels || [],
       });
     } catch (error) {
       next(error);

@@ -1,5 +1,11 @@
 import { useState, useRef, useEffect, FormEvent, KeyboardEvent } from 'react';
-import { Send, Loader2, Bot, User, Compass } from 'lucide-react';
+import { Send, Loader2, Bot, User, Compass, ChevronDown, ChevronRight, AlertCircle } from 'lucide-react';
+
+interface ModelResponse {
+  model: string;
+  answer: string;
+  reasoning?: string;
+}
 
 interface Message {
   id: string;
@@ -12,6 +18,8 @@ interface Message {
     agreementScore: number;
   };
   modelsUsed?: string[];
+  modelResponses?: ModelResponse[];
+  failedModels?: string[];
 }
 
 interface AgentStatus {
@@ -40,8 +48,21 @@ export default function App() {
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const [expandedResponses, setExpandedResponses] = useState<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const toggleResponseExpanded = (messageId: string) => {
+    setExpandedResponses((prev) => {
+      const next = new Set(prev);
+      if (next.has(messageId)) {
+        next.delete(messageId);
+      } else {
+        next.add(messageId);
+      }
+      return next;
+    });
+  };
 
   // Fetch agent status on mount
   useEffect(() => {
@@ -110,6 +131,8 @@ export default function App() {
         timestamp: new Date(),
         consensus: data.consensus,
         modelsUsed: data.models_used,
+        modelResponses: data.model_responses,
+        failedModels: data.failed_models,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
@@ -280,6 +303,55 @@ export default function App() {
                             })}
                           </div>
                         )}
+                        {/* Failed Models Warning */}
+                        {message.failedModels && message.failedModels.length > 0 && (
+                          <div className="flex items-center gap-1 text-xs text-red-500 dark:text-red-400">
+                            <AlertCircle className="w-3 h-3" />
+                            <span>Failed: {message.failedModels.join(', ')}</span>
+                          </div>
+                        )}
+                        {/* Individual Model Responses Toggle */}
+                        {message.modelResponses && message.modelResponses.length > 0 && (
+                          <button
+                            onClick={() => toggleResponseExpanded(message.id)}
+                            className="flex items-center gap-1 text-xs text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 transition-colors mt-1"
+                          >
+                            {expandedResponses.has(message.id) ? (
+                              <ChevronDown className="w-3 h-3" />
+                            ) : (
+                              <ChevronRight className="w-3 h-3" />
+                            )}
+                            <span>
+                              {expandedResponses.has(message.id) ? 'Hide' : 'Show'} individual responses ({message.modelResponses.length})
+                            </span>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                    {/* Expanded Individual Model Responses */}
+                    {message.modelResponses && message.modelResponses.length > 0 && expandedResponses.has(message.id) && (
+                      <div className="mt-3 pt-3 border-t border-slate-200 dark:border-slate-600 space-y-3">
+                        <h4 className="text-xs font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+                          Individual AI Responses
+                        </h4>
+                        {message.modelResponses.map((resp, idx) => {
+                          const { name, color } = getModelInfo(resp.model);
+                          return (
+                            <div key={idx} className="bg-slate-50 dark:bg-slate-700/50 rounded-lg p-3 space-y-2">
+                              <div className="flex items-center gap-2">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${color}`}>
+                                  {name}
+                                </span>
+                                <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate" title={resp.model}>
+                                  {resp.model}
+                                </span>
+                              </div>
+                              <p className="text-sm text-slate-600 dark:text-slate-300 whitespace-pre-wrap">
+                                {resp.answer}
+                              </p>
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
