@@ -8,30 +8,35 @@
  * - UNANIMOUS: All models agree (score >= 0.9)
  * - SPLIT: Majority agrees (score >= 0.6 and < 0.9)
  * - NO_CONSENSUS: Significant disagreement (score < 0.6)
+ *
+ * Enhanced with:
+ * - Guardrails: Input/output validation
+ * - Reflection: Answer quality improvement
+ * - Memory: Session context and learning
  */
 
 import natural from 'natural';
 import { getModelRouter } from './model-router.js';
 import { getMetrics } from '../pap/metrics.js';
+import {
+  validateInput,
+  isGuardrailsEnabled,
+  ENHANCED_JURY_PROMPT,
+} from './guardrails.js';
+import {
+  reflectOnConsensus,
+  shouldApplyReflection,
+  isReflectionEnabled,
+  QUALITY_THRESHOLD,
+} from './reflection.js';
+import {
+  getMemoryManager,
+  isMemoryEnabled,
+} from './memory.js';
 
 const TfIdf = natural.TfIdf;
 const WordTokenizer = natural.WordTokenizer;
 const tokenizer = new WordTokenizer();
-
-// System prompt for jury-style responses
-const JURY_SYSTEM_PROMPT = `You are participating in an AI Jury deliberation. Your role is to provide a thoughtful, well-reasoned answer to the user's question.
-
-Guidelines:
-1. Be concise but thorough
-2. Provide your reasoning
-3. If uncertain, express your confidence level
-4. Focus on factual accuracy
-5. Structure your response with:
-   - A direct answer to the question
-   - Brief supporting reasoning (2-3 key points)
-   - Any important caveats or limitations
-
-Remember: Your response will be compared with other AI models to reach a consensus verdict.`;
 
 export interface ModelResponse {
   model: string;
@@ -52,6 +57,15 @@ export interface ConsensusResult {
   responses: ModelResponse[];
   dissent?: ModelResponse;
   consensusAnswer?: string;
+  // Reflection pattern fields
+  reflectionApplied?: boolean;
+  qualityScore?: number;
+  originalConsensusAnswer?: string;
+  // Memory pattern fields
+  sessionId?: string;
+  memoryContextUsed?: boolean;
+  // Guardrails fields
+  guardrailsApplied?: boolean;
 }
 
 // Consensus thresholds
@@ -87,7 +101,7 @@ export async function queryAllModels(
       const response = await router.chat({
         model,
         messages: [
-          { role: 'system', content: JURY_SYSTEM_PROMPT },
+          { role: 'system', content: ENHANCED_JURY_PROMPT },
           { role: 'user', content: userMessage },
         ],
         temperature: 0.3, // Lower temperature for consistency
@@ -352,22 +366,117 @@ export function calculateConsensus(responses: ModelResponse[]): ConsensusResult 
 }
 
 /**
- * Execute a complete jury query
+ * Guardrail validation error
+ */
+export class GuardrailError extends Error {
+  constructor(
+    message: string,
+    public readonly reason: string,
+    public readonly riskLevel: string
+  ) {
+    super(message);
+    this.name = 'GuardrailError';
+  }
+}
+
+/**
+ * Execute a complete jury query with guardrails, reflection, and memory
  */
 export async function executeJuryQuery(params: {
   question: string;
   context?: string;
   models?: string[];
+  sessionId?: string;
+  enableReflection?: boolean;
+  enableMemory?: boolean;
+  enableGuardrails?: boolean;
 }): Promise<ConsensusResult> {
-  const { question, context, models } = params;
+  const {
+    question,
+    context,
+    models,
+    sessionId,
+    enableReflection = isReflectionEnabled(),
+    enableMemory = isMemoryEnabled(),
+    enableGuardrails = isGuardrailsEnabled(),
+  } = params;
 
-  // Query all models
-  const responses = await queryAllModels(question, models, context);
+  // Step 1: Input validation (guardrails)
+  if (enableGuardrails) {
+    const inputValidation = validateInput(question);
+    if (!inputValidation.allowed) {
+      throw new GuardrailError(
+        'Input blocked by guardrails',
+        inputValidation.reason || 'Unknown reason',
+        inputValidation.riskLevel
+      );
+    }
+  }
 
-  // Calculate consensus
-  const result = calculateConsensus(responses);
+  // Step 2: Get conversation context from memory
+  let enrichedContext = context || '';
+  let memoryContextUsed = false;
+  let memoryManager = null;
 
-  // Record overall query metrics
+  if (enableMemory && sessionId) {
+    memoryManager = getMemoryManager(sessionId);
+    const conversationContext = memoryManager.getConversationContext();
+    if (conversationContext) {
+      enrichedContext = enrichedContext
+        ? `${conversationContext}\n\n${enrichedContext}`
+        : conversationContext;
+      memoryContextUsed = true;
+    }
+  }
+
+  // Step 3: Query all models
+  const responses = await queryAllModels(question, models, enrichedContext || undefined);
+
+  // Step 4: Calculate consensus
+  let result = calculateConsensus(responses);
+
+  // Add metadata
+  result.guardrailsApplied = enableGuardrails;
+  result.sessionId = sessionId;
+  result.memoryContextUsed = memoryContextUsed;
+
+  // Step 5: Apply reflection pattern
+  if (
+    enableReflection &&
+    shouldApplyReflection(result.verdict, result.consensusAnswer)
+  ) {
+    try {
+      const reflection = await reflectOnConsensus(
+        question,
+        result.consensusAnswer!,
+        result.responses
+      );
+
+      result.qualityScore = reflection.qualityScore;
+
+      // Use refined answer if quality is above threshold
+      if (reflection.qualityScore >= QUALITY_THRESHOLD) {
+        result.originalConsensusAnswer = result.consensusAnswer;
+        result.consensusAnswer = reflection.refinedAnswer;
+        result.reflectionApplied = true;
+      }
+    } catch (error) {
+      console.error('[Consensus] Reflection failed:', error);
+      // Continue without reflection
+    }
+  }
+
+  // Step 6: Store in memory
+  if (enableMemory && memoryManager && result.consensusAnswer) {
+    memoryManager.addToSession({
+      question,
+      consensusAnswer: result.consensusAnswer,
+      verdict: result.verdict,
+      agreementScore: result.agreementScore,
+    });
+  }
+
+  // Step 7: Record overall query metrics
   const metrics = getMetrics();
   if (metrics) {
     metrics.recordQuery({

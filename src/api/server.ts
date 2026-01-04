@@ -17,8 +17,9 @@ import { getLifecycle } from '../pap/lifecycle.js';
 import { getHeartbeat } from '../pap/heartbeat.js';
 import { getMetrics } from '../pap/metrics.js';
 import { getModelRouter } from '../ai/model-router.js';
-import { executeJuryQuery } from '../ai/consensus.js';
+import { executeJuryQuery, GuardrailError } from '../ai/consensus.js';
 import { formatVerdict, formatForTwitter, formatAsMarkdown } from '../ai/verdict.js';
+import { getMemoryManager, getMemoryStats, cleanupExpiredSessions } from '../ai/memory.js';
 
 // Request validation schemas
 const QueryRequestSchema = z.object({
@@ -60,6 +61,20 @@ export function createServer(config: ServerConfig): Application {
   // Error handling middleware
   const errorHandler = (err: Error, _req: Request, res: Response, _next: NextFunction) => {
     console.error('[Server] Error:', err);
+
+    // Handle guardrail errors specifically
+    if (err instanceof GuardrailError) {
+      res.status(400).json({
+        error: {
+          code: 'GUARDRAIL_BLOCKED',
+          message: err.message,
+          reason: err.reason,
+          riskLevel: err.riskLevel,
+        },
+      });
+      return;
+    }
+
     res.status(500).json({
       error: {
         code: 'INTERNAL_ERROR',
@@ -67,6 +82,14 @@ export function createServer(config: ServerConfig): Application {
       },
     });
   };
+
+  // Start periodic session cleanup (every 5 minutes)
+  setInterval(() => {
+    const cleaned = cleanupExpiredSessions();
+    if (cleaned > 0) {
+      console.log(`[Server] Cleaned up ${cleaned} expired sessions`);
+    }
+  }, 5 * 60 * 1000);
 
   // Health endpoint (PAP compliant)
   app.get('/health', (_req: Request, res: Response) => {
@@ -155,6 +178,9 @@ export function createServer(config: ServerConfig): Application {
 
       const { question, context, models: requestModels, format } = parseResult.data;
 
+      // Extract session ID from header (or undefined for stateless query)
+      const sessionId = req.headers['x-session-id'] as string | undefined;
+
       // Increment request counter
       metricsCollector?.incrementRequests();
 
@@ -163,11 +189,12 @@ export function createServer(config: ServerConfig): Application {
         ? requestModels
         : config.models;
 
-      // Execute jury query
+      // Execute jury query with session support
       const result = await executeJuryQuery({
         question,
         context,
         models: modelsToUse,
+        sessionId,
       });
 
       // Format verdict
@@ -303,7 +330,10 @@ compass_consensus_no_consensus_total ${data.consensusResults.no_consensus}
 
       const { message, history } = parseResult.data;
 
-      // Build context from history
+      // Extract session ID from header (or undefined for stateless chat)
+      const sessionId = req.headers['x-session-id'] as string | undefined;
+
+      // Build context from history (memory will also add conversation context)
       const context = history
         ?.map((h) => `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.content}`)
         .join('\n\n');
@@ -311,11 +341,12 @@ compass_consensus_no_consensus_total ${data.consensusResults.no_consensus}
       // Increment request counter
       metricsCollector?.incrementRequests();
 
-      // Execute jury query with configured models
+      // Execute jury query with session support
       const result = await executeJuryQuery({
         question: message,
         context: context || undefined,
         models: config.models,
+        sessionId,
       });
 
       // Format verdict
@@ -333,10 +364,56 @@ compass_consensus_no_consensus_total ${data.consensusResults.no_consensus}
         // Include individual model responses for UI to display
         model_responses: report.responses || [],
         failed_models: report.failedModels || [],
+      // Include session info if available
+      session_id: result.sessionId,
+      memory_context_used: result.memoryContextUsed,
+      reflection_applied: result.reflectionApplied,
+      quality_score: result.qualityScore,
       });
     } catch (error) {
       next(error);
     }
+  });
+
+  // Session history endpoint - get conversation history for a session
+  app.get('/api/chat/history/:sessionId', (req: Request, res: Response) => {
+    const { sessionId } = req.params;
+
+    if (!sessionId) {
+      res.status(400).json({
+        error: {
+          code: 'MISSING_SESSION_ID',
+          message: 'Session ID is required',
+        },
+      });
+      return;
+    }
+
+    const memoryManager = getMemoryManager(sessionId);
+    const history = memoryManager.getSessionHistory();
+
+    res.json({
+      session_id: sessionId,
+      query_count: history.length,
+      queries: history.map(entry => ({
+        id: entry.id,
+        question: entry.question,
+        answer: entry.consensusAnswer,
+        verdict: entry.verdict,
+        agreement_score: entry.agreementScore,
+        timestamp: entry.timestamp.toISOString(),
+      })),
+    });
+  });
+
+  // Memory stats endpoint - for monitoring
+  app.get('/api/memory/stats', (_req: Request, res: Response) => {
+    const stats = getMemoryStats();
+    res.json({
+      active_sessions: stats.activeSessions,
+      total_session_queries: stats.totalSessionQueries,
+      long_term_memory_size: stats.longTermMemorySize,
+    });
   });
 
   // Serve static frontend files
@@ -346,7 +423,7 @@ compass_consensus_no_consensus_total ${data.consensusResults.no_consensus}
 
   // SPA fallback - serve index.html for non-API routes
   app.get('*', (req: Request, res: Response, next: NextFunction) => {
-    // Skip API routes and health checks
+    // Skip API routes, health checks, and new endpoints
     if (req.path.startsWith('/api') ||
         req.path === '/health' ||
         req.path === '/status' ||
