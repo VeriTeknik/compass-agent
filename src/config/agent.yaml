@@ -1,0 +1,341 @@
+# Compass Agent - ADL Manifest
+# Agent Definition Language v0.2 (Cloud Agent Extension)
+
+adl: "0.2"
+type: "cloud"
+
+metadata:
+  id: "compass-v1"
+  name: "Compass - AI Jury"
+  version: "1.0.0"
+  description: "Multi-AI consensus agent for trusted research. Queries multiple AI models and synthesizes their responses into a verdict with confidence scoring."
+  category: "research"
+  tags:
+    - ai
+    - consensus
+    - jury
+    - research
+    - multi-model
+  icon: "compass"
+  icon_url: "https://raw.githubusercontent.com/veriteknik/compass-agent/main/icon.png"
+  author: "pluggedin"
+  license: "MIT"
+  homepage: "https://compass.plugged.in"
+  repository: "https://github.com/veriteknik/pluggedin-agent-templates"
+
+# User-configurable options (Template-Driven Configuration)
+# pluggedin-app reads this section and generates dynamic configuration UI
+configurable:
+  models:
+    type: "multi-select"
+    source: "model-router"
+    min: 2
+    max: 4
+    default:
+      - "gpt-4o"
+      - "claude-3-5-sonnet-20241022"
+      - "gemini-1.5-flash"
+    env_var: "COMPASS_MODELS"
+    ui:
+      label: "AI Models"
+      description: "Select AI models for consensus voting (2-4 models)"
+      show_provider_icons: true
+
+  consensus_threshold:
+    type: "slider"
+    min: 0.5
+    max: 0.95
+    step: 0.05
+    default: 0.6
+    env_var: "CONSENSUS_THRESHOLD"
+    ui:
+      label: "Consensus Threshold"
+      description: "Minimum agreement score for split verdict (0.6 = 60%)"
+
+  max_tokens:
+    type: "number"
+    min: 256
+    max: 8192
+    default: 2048
+    env_var: "AI_MAX_TOKENS"
+    ui:
+      label: "Max Tokens"
+      description: "Maximum response length per model"
+
+  temperature:
+    type: "slider"
+    min: 0
+    max: 1
+    step: 0.1
+    default: 0.3
+    env_var: "AI_TEMPERATURE"
+    ui:
+      label: "Temperature"
+      description: "Model creativity (lower = more consistent)"
+
+# Resource requirements
+requirements:
+  edge:
+    type:
+      - "hardy"    # Full LLM support
+      - "lite"     # Limited resources OK
+    min_memory: "256Mi"
+    min_cpu: "0.25"
+  cloud:
+    tier:
+      - "free"
+      - "pro"
+      - "enterprise"
+
+# Model requirements
+models:
+  required:
+    - capability: "chat"
+      min_context: 4096
+  optional:
+    - capability: "vision"
+    - capability: "function_calling"
+  minimum_count: 2  # At least 2 models needed for consensus
+
+# Input/Output schema
+io:
+  input:
+    type: object
+    properties:
+      question:
+        type: string
+        required: true
+        minLength: 1
+        maxLength: 10000
+        description: "The research question to analyze"
+      context:
+        type: string
+        maxLength: 50000
+        description: "Additional context for the query"
+      models:
+        type: array
+        items:
+          type: string
+        minItems: 2
+        maxItems: 10
+        description: "Override default models for this query"
+
+  output:
+    type: object
+    properties:
+      id:
+        type: string
+        format: uuid
+        description: "Unique verdict ID"
+      verdict:
+        type: string
+        enum:
+          - unanimous
+          - split
+          - no_consensus
+        description: "Consensus verdict type"
+      confidence:
+        type: string
+        enum:
+          - high
+          - medium
+          - low
+        description: "Confidence level of the verdict"
+      agreementScore:
+        type: number
+        minimum: 0
+        maximum: 1
+        description: "Numeric agreement score (0-1)"
+      consensusAnswer:
+        type: string
+        nullable: true
+        description: "The consensus answer from majority of models"
+      responses:
+        type: array
+        items:
+          type: object
+          properties:
+            model:
+              type: string
+            answer:
+              type: string
+        description: "Individual model responses"
+      dissent:
+        type: object
+        nullable: true
+        properties:
+          model:
+            type: string
+          answer:
+            type: string
+        description: "Dissenting opinion (for split verdicts)"
+      shareableUrl:
+        type: string
+        format: uri
+        description: "URL to share this verdict"
+
+# Rules engine
+rules:
+  # Rule: Unanimous verdict (all models agree)
+  - id: "unanimous_verdict"
+    type: "composite"
+    description: "All models reach consensus"
+    trigger:
+      operator: "AND"
+      conditions:
+        - field: "model_count"
+          operator: ">="
+          value: 3
+        - field: "agreement_score"
+          operator: ">="
+          value: 0.9
+    actions:
+      - "return_high_confidence"
+    priority: 1
+
+  # Rule: Split verdict (majority agrees)
+  - id: "split_verdict"
+    type: "threshold"
+    description: "Majority of models agree with dissent"
+    trigger:
+      conditions:
+        - field: "agreement_score"
+          operator: ">="
+          value: 0.6
+        - field: "agreement_score"
+          operator: "<"
+          value: 0.9
+    actions:
+      - "return_with_dissent"
+    priority: 2
+
+  # Rule: No consensus (significant disagreement)
+  - id: "no_consensus"
+    type: "threshold"
+    description: "Models disagree significantly"
+    trigger:
+      conditions:
+        - field: "agreement_score"
+          operator: "<"
+          value: 0.6
+    actions:
+      - "return_low_confidence"
+      - "suggest_clarification"
+    priority: 3
+
+# Actions
+actions:
+  - id: "return_high_confidence"
+    type: "response"
+    description: "Return unanimous verdict with high confidence"
+    config:
+      confidence: "high"
+      verdict: "unanimous"
+      include_all_responses: true
+
+  - id: "return_with_dissent"
+    type: "response"
+    description: "Return split verdict highlighting dissent"
+    config:
+      confidence: "medium"
+      verdict: "split"
+      show_dissent: true
+      include_all_responses: true
+
+  - id: "return_low_confidence"
+    type: "response"
+    description: "Return no consensus verdict"
+    config:
+      confidence: "low"
+      verdict: "no_consensus"
+      include_all_responses: true
+
+  - id: "suggest_clarification"
+    type: "suggestion"
+    description: "Suggest user clarify or rephrase question"
+    config:
+      message: "The AI models could not reach consensus. Consider rephrasing your question or providing more context."
+
+# Pricing tiers
+pricing:
+  free:
+    queries_per_day: 10
+    models_per_query: 3
+    max_context_length: 4096
+    features:
+      - basic_consensus
+      - json_output
+  pro:
+    queries_per_day: 1000
+    models_per_query: 5
+    max_context_length: 32000
+    features:
+      - basic_consensus
+      - json_output
+      - markdown_output
+      - twitter_format
+      - shareable_links
+      - query_history
+  enterprise:
+    queries_per_day: unlimited
+    models_per_query: 10
+    max_context_length: 128000
+    features:
+      - basic_consensus
+      - json_output
+      - markdown_output
+      - twitter_format
+      - shareable_links
+      - query_history
+      - custom_models
+      - webhooks
+      - sla_guarantee
+
+# PAP telemetry configuration
+telemetry:
+  heartbeat:
+    default_mode: "IDLE"
+    intervals:
+      EMERGENCY: 5000
+      IDLE: 30000
+      SLEEP: 900000
+  metrics:
+    interval: 60000
+    custom_metrics:
+      - name: "consensus_rate"
+        type: "gauge"
+        description: "Percentage of queries with consensus"
+      - name: "avg_query_latency_ms"
+        type: "gauge"
+        description: "Average query latency in milliseconds"
+      - name: "model_availability"
+        type: "gauge"
+        description: "Per-model availability status"
+
+# API endpoints
+endpoints:
+  - path: "/query"
+    method: "POST"
+    description: "Execute a jury query"
+    auth_required: true
+    rate_limited: true
+
+  - path: "/health"
+    method: "GET"
+    description: "PAP health check"
+    auth_required: false
+
+  - path: "/status"
+    method: "GET"
+    description: "Agent status and model availability"
+    auth_required: false
+
+  - path: "/models"
+    method: "GET"
+    description: "List available models"
+    auth_required: false
+
+  - path: "/metrics"
+    method: "GET"
+    description: "Prometheus metrics"
+    auth_required: false
